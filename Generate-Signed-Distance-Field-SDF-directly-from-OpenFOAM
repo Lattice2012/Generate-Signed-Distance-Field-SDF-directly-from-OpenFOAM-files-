@@ -1,10 +1,12 @@
-# 这份代码, 可以从 openfoam 的网格文件中，直接计算 SDF
-
 import re
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.spatial
-
+from scipy.interpolate import RBFInterpolator
+from pathlib import Path
+import os
+import numpy as np
+from pyvista import UnstructuredGrid
 
 
 def read_points(file):
@@ -38,6 +40,7 @@ def read_points(file):
         raise FileNotFoundError(f"文件不存在: {file}")
     except Exception as e:
         raise RuntimeError(f"解析错误: {str(e)}")
+
 def read_faces(file):
     """
     改进版本：支持 OpenFOAM 多格式面文件解析
@@ -75,6 +78,7 @@ def read_faces(file):
         raise FileNotFoundError(f"文件不存在: {file}")
     except Exception as e:
         raise RuntimeError(f"解析错误: {str(e)}")
+
 def read_boundary(file, patch_name="BLADE"):
     """
     增强版：支持 OpenFOAM 多格式 boundary 文件解析
@@ -118,6 +122,7 @@ def read_boundary(file, patch_name="BLADE"):
         raise FileNotFoundError(f"文件不存在: {file}")
     except Exception as e:
         raise RuntimeError(f"解析错误: {str(e)}")
+
 def extract_wall_patch(points, xfaces, wall_startFace, wall_nFaces):
     """提取壁面相关点及原始索引（带完整参数校验）"""
 
@@ -185,7 +190,8 @@ def extract_wall_patch(points, xfaces, wall_startFace, wall_nFaces):
         raise RuntimeError("点坐标提取失败，请确保 points 与索引一致性") from e
 
     return wall_points, np.array(sorted_indices)
-def compute_face_normals(points, faces):
+
+def compute_face_normals_back(points, faces):
     """ 计算所有面的法向量（支持任意多边形面） """
     normals = np.zeros((len(points), 3))
     count = np.zeros(len(points))
@@ -224,7 +230,8 @@ def compute_face_normals(points, faces):
     valid = count > 0
     normals[valid] /= np.linalg.norm(normals[valid], axis=1, keepdims=True)
     return normals
-def compute_signed_sdf(wall_points, wall_normals, query_points):
+
+def compute_signed_sdf_back(wall_points, wall_normals, query_points):
     """ 向量化 SDF 计算 """
     tree = scipy.spatial.KDTree(wall_points)
     distances, nearest_idx = tree.query(query_points)
@@ -234,9 +241,59 @@ def compute_signed_sdf(wall_points, wall_normals, query_points):
     return np.sign(dot_prods) * distances
 
 
-blade_points = 'your_path/openfoam/your_case/constant/polyMesh/points'
-blade_faces = 'your_path/openfoam/your_case/constant/polyMesh/faces'
-blade_boundary = 'your_path/openfoam/your_case/constant/polyMesh/boundary'
+def compute_face_normals(points, faces):
+    """ 计算所有面的法向量（支持任意多边形面，修正方向指向外部） """
+    normals = np.zeros((len(points), 3))
+    count = np.zeros(len(points))
+
+    for face in faces:
+        if len(face) < 3:
+            continue
+
+        # 将面分解为三角形扇形
+        p0 = np.array(points[face[0]])
+        for i in range(2, len(face)):
+            p1 = np.array(points[face[i - 1]])
+            p2 = np.array(points[face[i]])
+
+            # 计算法向量（修正方向：叉乘顺序改为 vec2 × vec1）
+            vec1 = p1 - p0
+            vec2 = p2 - p0
+            normal = np.cross(vec2, vec1)  # 关键修改：交换叉乘顺序
+
+            norm = np.linalg.norm(normal)
+            if norm < 1e-10:
+                continue
+
+            normal /= norm
+
+            # 累加到顶点
+            for idx in [face[0], face[i - 1], face[i]]:
+                if idx >= len(points):
+                    raise IndexError(f"无效顶点索引 {idx}，总点数 {len(points)}")
+                normals[idx] += normal
+                count[idx] += 1
+
+    # 归一化
+    valid = count > 0
+    normals[valid] /= np.linalg.norm(normals[valid], axis=1, keepdims=True)
+    return normals
+
+
+def compute_signed_sdf(wall_points, wall_normals, query_points):
+    """ 向量化 SDF 计算（符号方向已修正） """
+    tree = scipy.spatial.KDTree(wall_points)
+    distances, nearest_idx = tree.query(query_points)
+
+    vectors = query_points - wall_points[nearest_idx]
+    dot_prods = np.einsum('ij,ij->i', vectors, wall_normals[nearest_idx])
+
+    # 确保符号约定：外部为正，内部为负
+    return distances * np.sign(dot_prods)
+
+blade_points = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/points'
+blade_faces = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/faces'
+blade_boundary = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/boundary'
 
 points = read_points(blade_points)
 faces = read_faces(blade_faces)
@@ -249,26 +306,96 @@ wall_points, wall_indices = extract_wall_patch(
     wall_startFace = startFace,
     wall_nFaces = nFaces
 )
+
 wall_normals = compute_face_normals(points, faces)[wall_indices]
 
 
-query_points = points[:,:2]
 
-# 计算 SDF（保持三维特性）
+##########################################################################################
+
+
+
+# 定义 polyMesh 文件夹路径
+polyMesh_path = Path("/Users/southfox/Computation/openfoam/1.18e5//constant/polyMesh")
+
+# ------------------------------
+# 1. 读取 points 文件
+# ------------------------------
+points = []
+with open(polyMesh_path / "points", "r") as f:
+    lines = f.readlines()
+    # 跳过文件头，找到 points 数据起始位置
+    start = lines.index("(\n") + 1
+    end = lines.index(")\n", start)
+    for line in lines[start:end]:
+        # 提取坐标，例如 "(0 0 0)" -> [0, 0, 0]
+        coords = line.strip().strip("()").split()
+        points.append([float(x) for x in coords])
+points = np.array(points)  # 转换为 NumPy 数组
+
+# ------------------------------
+# 2. 读取 owner 文件，获取单元-面关系
+# ------------------------------
+owner = []
+with open(polyMesh_path / "owner", "r") as f:
+    lines = f.readlines()
+    start = lines.index("(\n") + 1
+    end = lines.index(")\n", start)
+    owner = [int(line.strip()) for line in lines[start:end]]
+
+# ------------------------------
+# 3. 读取 faces 文件，获取面-点关系
+# ------------------------------
+faces = []
+with open(polyMesh_path / "faces", "r") as f:
+    lines = f.readlines()
+    start = lines.index("(\n") + 1
+    end = lines.index(")\n", start)
+    face_str = "".join(lines[start:end]).replace("\n", "")
+    # 解析面数据，例如 "4(0 1 2 3)" -> [0, 1, 2, 3]
+    face_str = face_str.split(")")[:-1]  # 分割每个面
+    for fs in face_str:
+        n_points = int(fs.split("(")[0])
+        pts = fs.split("(")[1].split()
+        faces.append([int(p) for p in pts])
+
+# ------------------------------
+# 4. 计算每个单元的中心（近似方法）
+# ------------------------------
+# 统计每个单元关联的面，再统计面的所有点
+cell_points = {}
+for face_id, cell_id in enumerate(owner):
+    if cell_id not in cell_points:
+        cell_points[cell_id] = []
+    # 获取面中的点
+    cell_points[cell_id].extend(faces[face_id])
+
+# 去重并计算中心
+cell_centers = []
+for cell_id in sorted(cell_points.keys()):
+    pts = np.unique(cell_points[cell_id])  # 去重
+    center = np.mean(points[pts], axis=0)  # 几何平均
+    cell_centers.append(center)
+
+cell_centers = np.array(cell_centers)
+cell_centers = cell_centers[:, :2]
+print("Cell centers shape:", cell_centers.shape)
+
+query_points = cell_centers
+
 sdf = compute_signed_sdf(
     wall_points[:, :2],  # 使用二维投影
     wall_normals[:, :2],
-    #query_points
     query_points
 )
 
-
-x = points[:, 0]  # X 坐标
-y = points[:, 1]  # Y 坐标
+x = query_points[:, 0]  # X 坐标
+y = query_points[:, 1]  # Y 坐标
 sdf_values = sdf  # 每个点的 Signed Distance 值
 
-sc = plt.scatter(points[:, 0], points[:, 1], c=sdf, cmap="coolwarm", s=5)
+sc = plt.scatter(x, y, c=sdf_values, cmap="coolwarm", s=5)
 plt.colorbar(sc, label="Signed Distance")  # 添加颜色条
 plt.axis("equal")
 plt.title("Colored Scatter Plot by SDF Value")
 plt.show()
+
