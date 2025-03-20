@@ -231,9 +231,9 @@ def compute_signed_sdf(wall_points, wall_normals, query_points):
     dot_prods = np.einsum('ij,ij->i', vectors, wall_normals[nearest_idx])
     return np.sign(dot_prods) * distances
 
-blade_points = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/points'
-blade_faces = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/faces'
-blade_boundary = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/boundary'
+blade_points = 'your_path_to_openfoam/openfoam/1.18e5/constant/polyMesh/points'
+blade_faces = 'your_path_to_openfoam/openfoam/1.18e5/constant/polyMesh/faces'
+blade_boundary = 'your_path_to_openfoam/openfoam/1.18e5/constant/polyMesh/boundary'
 
 points = read_points(blade_points)
 faces = read_faces(blade_faces)
