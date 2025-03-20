@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy.spatial
 
+
+
 def read_points(file):
     """
     修复版本：支持 OpenFOAM 多格式 points 文件
@@ -231,9 +233,10 @@ def compute_signed_sdf(wall_points, wall_normals, query_points):
     dot_prods = np.einsum('ij,ij->i', vectors, wall_normals[nearest_idx])
     return np.sign(dot_prods) * distances
 
-blade_points = 'your_path_to_openfoam/openfoam/1.18e5/constant/polyMesh/points'
-blade_faces = 'your_path_to_openfoam/openfoam/1.18e5/constant/polyMesh/faces'
-blade_boundary = 'your_path_to_openfoam/openfoam/1.18e5/constant/polyMesh/boundary'
+
+blade_points = 'your_path/openfoam/your_case/constant/polyMesh/points'
+blade_faces = 'your_path/openfoam/your_case/constant/polyMesh/faces'
+blade_boundary = 'your_path/openfoam/your_case/constant/polyMesh/boundary'
 
 points = read_points(blade_points)
 faces = read_faces(blade_faces)
@@ -248,27 +251,24 @@ wall_points, wall_indices = extract_wall_patch(
 )
 wall_normals = compute_face_normals(points, faces)[wall_indices]
 
-# 生成查询点（显式处理三维数据）
-wall_min = wall_points.min(axis=0)
-wall_max = wall_points.max(axis=0)
-padding = 0.1
-xx, yy = np.meshgrid(
-    np.linspace(wall_min[0] - padding, wall_max[0] + padding, 100),
-    np.linspace(wall_min[1] - padding, wall_max[1] + padding, 100)
-)
-query_points = np.column_stack([xx.ravel(), yy.ravel()])
+
+query_points = points[:,:2]
 
 # 计算 SDF（保持三维特性）
 sdf = compute_signed_sdf(
     wall_points[:, :2],  # 使用二维投影
     wall_normals[:, :2],
+    #query_points
     query_points
 )
 
-# 可视化
-plt.figure(figsize=(10, 8))
-contour = plt.contourf(xx, yy, sdf.reshape(xx.shape), levels=50, cmap="coolwarm")
-plt.colorbar(contour, label="Signed Distance")
-plt.scatter(wall_points[:, 0], wall_points[:, 1], c='k', s=1, label="Wall")
+
+x = points[:, 0]  # X 坐标
+y = points[:, 1]  # Y 坐标
+sdf_values = sdf  # 每个点的 Signed Distance 值
+
+sc = plt.scatter(points[:, 0], points[:, 1], c=sdf, cmap="coolwarm", s=5)
+plt.colorbar(sc, label="Signed Distance")  # 添加颜色条
 plt.axis("equal")
+plt.title("Colored Scatter Plot by SDF Value")
 plt.show()
