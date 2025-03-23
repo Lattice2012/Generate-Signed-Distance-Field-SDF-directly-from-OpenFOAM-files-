@@ -100,12 +100,7 @@ def read_field_data(case_path, time_dir):
     # 标量场 (nut, p)
     nut = read_scalar_field(time_dir, "nut")
     p = read_scalar_field(time_dir, "p")
-    print("U_cell",U[0:5])
-    print("nut_cell", nut[0:5])
-    print("p_cell", p[0:5])
     return nut, p, U
-
-
 def read_openfoam_mesh(case_path):
     """
     读取 OpenFOAM 网格的点和单元信息
@@ -151,7 +146,6 @@ def read_openfoam_mesh(case_path):
         neighbour = [int(line.strip()) for line in lines[start:end]]
 
     return points, faces, owner, neighbour
-
 def extract_aerofoil_surface(start_face, n_faces , owner, boundary_name="BLADE"):
     """
     提取翼型表面（边界）的几何信息
@@ -175,7 +169,6 @@ def extract_aerofoil_surface(start_face, n_faces , owner, boundary_name="BLADE")
     aerofoil_cells = [[cell[0]] + [point_map[pt] for pt in cell[1:]] for cell in aerofoil_cells]
 
     return aerofoil_points, aerofoil_cells
-
 def calculate_length(points, cells):
     """
     计算每个单元的长度（适用于翼型的四边形单元）
@@ -205,7 +198,6 @@ def calculate_length(points, cells):
         else:
             lengths.append(0.0)  # 如果不是四边形单元，长度为 0
     return np.array(lengths)
-
 def extract_surface_points(points, cells):
     """
     提取翼型表面上的点
@@ -437,7 +429,6 @@ def read_boundary(file, patch_name="BLADE"):
         raise FileNotFoundError(f"文件不存在: {file}")
     except Exception as e:
         raise RuntimeError(f"解析错误: {str(e)}")
-
 def nearest_neighbor_sort(points_2d):
     """
     使用最近邻排序重新排列点
@@ -586,49 +577,6 @@ def plot_airfoil_with_normals(points, num_normals=50):
     plt.legend()
     plt.grid()
     plt.show()
-def create_vtp_file(case_path, time_dir, output_path, boundary_name="aerofoil"):
-    """
-    创建包含翼型信息的 VTP 文件
-    """
-    # 读取 OpenFOAM 网格
-    points, faces, owner = read_openfoam_mesh(case_path)
-
-    # 提取翼型表面
-    aerofoil_points, aerofoil_cells = extract_aerofoil_surface(points, faces, owner, boundary_name)
-
-    # 创建 PyVista 非结构化网格
-    aerofoil = pv.UnstructuredGrid(aerofoil_cells, [CellType.POLYGON] * len(aerofoil_cells), aerofoil_points)
-
-    # 读取场数据（假设已实现）
-    nut, p, U, normals = read_aerofoil_field_data(case_path, time_dir, boundary_name)
-
-    # ----------------------------
-    # 添加点数据 (Point Data)
-    # ----------------------------
-    aerofoil.point_data["nut"] = nut
-    aerofoil.point_data["p"] = p
-    aerofoil.point_data["U"] = U
-    aerofoil.point_data["Normals"] = normals
-
-    # ----------------------------
-    # 添加单元数据 (Cell Data)
-    # ----------------------------
-    #lengths = calculate_length(aerofoil_points, aerofoil_cells)
-    #aerofoil.cell_data["nut"] = nut[:len(aerofoil_cells)]
-    #aerofoil.cell_data["p"] = p[:len(aerofoil_cells)]
-    #aerofoil.cell_data["U"] = U[:len(aerofoil_cells)]
-    #aerofoil.cell_data["Normals"] = normals[:len(aerofoil_cells)]
-    #aerofoil.cell_data["Length"] = lengths
-
-    # ----------------------------
-    # 添加场数据 (Field Data)
-    # ----------------------------
-    time_value = float(time_dir)  # 时间步目录名即为时间值
-    aerofoil.field_data["TimeValue"] = [time_value]
-
-    # 保存为 VTP 文件
-    aerofoil.save(output_path)
-    print(f"VTP 文件已保存至: {output_path}")
 def process_face_data(start_face, num_faces, owner_data, neighbour_data, p_data, U_data, nut_data):
     """
     处理每个面对应的场变量数据并返回相应的场变量值
@@ -742,7 +690,6 @@ def calculate_intersection_lengths(cells, points_2d):
         else:
             intersection_lengths.append(0.0)  # 如果不是四边形面元，长度为 0
     return intersection_lengths
-
 def calculate_face_length(aerofoil_cells, aerofoil_points):
     """
     计算二维翼型在三维网格中的每个面（cell）的边长之和
@@ -773,10 +720,6 @@ def calculate_face_length(aerofoil_cells, aerofoil_points):
         face_lengths.append(total_length)
 
     return face_lengths
-
-
-
-
 def calculate_triangle_normal(v0, v1, v2):
     e1 = v1 - v0
     e2 = v2 - v0
@@ -786,7 +729,6 @@ def calculate_triangle_normal(v0, v1, v2):
         return np.array([0.0, 0.0, 0.0])  # 新增：返回零向量
     n_normalized = n / norm
     return n_normalized
-
 def calculate_quad_normal(v0, v1, v2, v3):
     n1 = calculate_triangle_normal(v0, v1, v2)
     n2 = calculate_triangle_normal(v0, v2, v3)
@@ -796,7 +738,6 @@ def calculate_quad_normal(v0, v1, v2, v3):
         return np.array([0.0, 0.0, 0.0])  # 新增：返回零向量
     n_avg_normalized = n_avg / norm
     return n_avg_normalized
-
 def calculate_face_normals(cell_airfoil, point_airfoil):
     """
     计算翼型表面每个单元的法向量
@@ -815,8 +756,6 @@ def calculate_face_normals(cell_airfoil, point_airfoil):
         normal = calculate_quad_normal(v0, v1, v2, v3)
         face_normals.append(normal)
     return np.array(face_normals)
-
-
 def cell_data_to_point_data(cell_data, cell_connectivity, num_points):
     """
     将 Cell Data 转换为 Point Data
@@ -844,83 +783,66 @@ def cell_data_to_point_data(cell_data, cell_connectivity, num_points):
     point_data /= point_counter[:, np.newaxis] if cell_data.ndim > 1 else point_counter
 
     return point_data
+def create_vtp_file(case_path, time_dir, output_path, boundary_name="BLADE"):
+    """
+    创建包含翼型信息的 VTP 文件
+    """
 
+    points, faces, owner, neighbour = read_openfoam_mesh(case_path)
+    aerofoil_points, aerofoil_cells = extract_aerofoil_surface(startFace, nFaces, owner, boundary_name="BLADE")
+    aerofoil = pv.PolyData(aerofoil_points, aerofoil_cells)
 
+    nut, p, U = read_field_data(case_path, time_dir)
+    lengths = calculate_face_length(aerofoil_cells, aerofoil_points)
+    normals = calculate_face_normals(aerofoil_cells, aerofoil_points)
+
+    p, U, nut = process_face_data(startFace, nFaces, owner, neighbour, p, U, nut)
+    aerofoil.cell_data["nut"] = nut
+    aerofoil.cell_data["p"] = p
+    aerofoil.cell_data["U"] = U
+    aerofoil.cell_data["lengths"] = lengths
+    aerofoil.cell_data["Normals"] = normals
+
+    nut_point = cell_data_to_point_data(nut, aerofoil_cells, len(aerofoil_points))
+    p_point = cell_data_to_point_data(p, aerofoil_cells, len(aerofoil_points))
+    U_point = cell_data_to_point_data(U, aerofoil_cells, len(aerofoil_points))
+    normals = cell_data_to_point_data(normals, aerofoil_cells, len(aerofoil_points))
+
+    aerofoil.point_data["nut"] = nut_point
+    aerofoil.point_data["p"] = p_point
+    aerofoil.point_data["U"] = U_point
+    aerofoil.point_data["normals"] = normals
+
+    time_value = float(time_dir)  # 时间步目录名即为时间值
+    aerofoil.field_data["TimeValue"] = [time_value]
+
+    # output_path = "aerofoil_surface.vtp" # 输出的 VTP 文件路径
+
+    print(f"VTP 文件已保存至: {output_path}")
+    aerofoil.save(output_path)
 
 
 case_path = "/Users/southfox/Computation/openfoam/1.18e5"
 time_dir = "20000"
-
 output_path = "aerofoil_surface.vtp" # 输出的 VTP 文件路径
 boundary_name = "BLADE"           # 翼型边界的名称（需与 boundary 文件一致）
 
+blade_points = os.path.join(case_path, "constant/polyMesh/points")
+blade_faces = os.path.join(case_path, "constant/polyMesh/faces")
+blade_boundary = os.path.join(case_path, "constant/polyMesh/boundary")
 
-
-blade_points = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/points'
-blade_faces = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/faces'
-blade_boundary = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/boundary'
 
 points = read_points(blade_points)
 faces = read_faces(blade_faces)
-boundary = read_boundary(blade_boundary, patch_name="BLADE")
+boundary = read_boundary(blade_boundary, boundary_name)
 startFace = boundary["startFace"]
 nFaces = boundary["nFaces"]
 
-
-points, faces, owner, neighbour = read_openfoam_mesh(case_path)
-aerofoil_points, aerofoil_cells = extract_aerofoil_surface(startFace, nFaces, owner, boundary_name="BLADE")
-aerofoil = pv.PolyData(aerofoil_points, aerofoil_cells)
-
-# ----------------------------
-# 添加单元数据 (Cell Data)
-# ----------------------------
-
-
-nut, p, U = read_field_data(case_path, time_dir)
-lengths = calculate_face_length(aerofoil_cells, aerofoil_points)
-normals = calculate_face_normals(aerofoil_cells, aerofoil_points)
-
-
-p, U, nut = process_face_data(startFace, nFaces, owner, neighbour, p, U, nut)
-aerofoil.cell_data["nut"] = nut
-aerofoil.cell_data["p"] = p
-aerofoil.cell_data["U"] = U
-aerofoil.cell_data["lengths"] = lengths
-aerofoil.cell_data["Normals"] = normals
-
-
-nut_point = cell_data_to_point_data(nut, aerofoil_cells, len(aerofoil_points))
-p_point = cell_data_to_point_data(p, aerofoil_cells, len(aerofoil_points))
-U_point = cell_data_to_point_data(U, aerofoil_cells, len(aerofoil_points))
-normals = cell_data_to_point_data(normals, aerofoil_cells, len(aerofoil_points))
-
-
-
-
-
-
-aerofoil.point_data["nut"] = nut_point
-aerofoil.point_data["p"] = p_point
-aerofoil.point_data["U"] = U_point
-aerofoil.point_data["normals"] = normals
-
-time_value = float(time_dir)  # 时间步目录名即为时间值
-aerofoil.field_data["TimeValue"] = [time_value]
-
-
-#output_path = "aerofoil_surface.vtp" # 输出的 VTP 文件路径
-
-# 保存为 VTP 文件
-aerofoil.save(output_path)
-
-
+create_vtp_file(case_path, time_dir, output_path, boundary_name)
 
 aerofoil = pv.read("aerofoil_surface.vtp")
-
 print('======================================================')
 
 print("aerofoil:", aerofoil.point_data.keys())
 print("aerofoil:", aerofoil.cell_data.keys())
 print("aerofoil:", aerofoil.field_data.keys())
-
-
