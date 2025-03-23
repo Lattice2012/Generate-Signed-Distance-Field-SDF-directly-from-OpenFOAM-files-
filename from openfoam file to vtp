@@ -1,0 +1,920 @@
+
+import os
+import numpy as np
+import pyvista as pv
+from pyvista import CellType
+import re
+from collections import defaultdict
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
+
+def read_vector_field(time_dir, field_name):
+    """
+    读取 OpenFOAM 矢量场（volVectorField）的 internalField 数据
+    返回形状为 (N_cells, 3) 的二维数组
+    """
+    #field_path = os.path.join(case_path, time_dir, field_name)
+
+    field_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/U"
+
+    with open(field_path, "r") as f:
+        lines = f.readlines()
+
+        # 定位数据起始位置
+        start = None
+        for i, line in enumerate(lines):
+            if "internalField" in line and "nonuniform" in line:
+                start = i + 2  # 跳过行如 '29808('
+                break
+
+        if start is None:
+            raise ValueError("未找到 internalField 数据")
+
+        # 提取所有矢量数据
+        vectors = []
+        for line in lines[start:]:
+            line = line.strip()
+            if line == ")":  # 数据结束
+                break
+            # 解析格式如 "(-29.5711 -29.4823 4.5193e-25)"
+            components = line.strip("()").split()
+            vectors.append([float(c) for c in components])
+    return np.array(vectors)
+def read_scalar_field(time_dir, field_name):
+    """
+    读取 OpenFOAM 标量场（volScalarField）的 internalField 数据
+    返回形状为 (N_cells,) 的一维数组
+    """
+    case_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/p"
+    field_path = case_path  # 假设直接读取 p 文件
+
+    with open(field_path, "r") as f:
+        lines = f.readlines()
+
+        # 定位数据起始位置
+        start = None
+        for i, line in enumerate(lines):
+            if "internalField" in line and "nonuniform" in line:
+                # 数据格式示例：
+                # internalField nonuniform List<scalar>
+                # 29808
+                # (
+                # 值1
+                # 值2
+                # ...
+                # )
+                start = i + 3  # 跳过 internalField 行、数据总数行和 '(' 行
+                break
+
+        if start is None:
+            raise ValueError("未找到 internalField 数据")
+
+        # 提取标量数据
+        values = []
+        for line in lines[start:]:
+            line = line.strip()
+            if line == ")":  # 数据结束
+                break
+            if line.startswith("//") or line == "(" or line == ")":
+                continue  # 跳过注释和括号
+            try:
+                values.append(float(line))
+            except ValueError:
+                print(f"警告：无法转换行数据为浮点数: {line}")
+                continue
+
+        # 验证数据完整性
+        declared_count = int(lines[i+1].strip())  # 文件声明的数据总数
+        if len(values) != declared_count:
+            raise ValueError(
+                f"数据不完整: 文件声明 {declared_count} 个值，实际解析 {len(values)} 个值"
+            )
+
+    return np.array(values)
+def read_field_data(case_path, time_dir):
+
+    U_cell = read_vector_field(time_dir, "U")
+    U = np.array([row for row in U_cell if len(row) > 0])
+
+    """读取场数据（标量和矢量）"""
+    # 标量场 (nut, p)
+    nut = read_scalar_field(time_dir, "nut")
+    p = read_scalar_field(time_dir, "p")
+    print("U_cell",U[0:5])
+    print("nut_cell", nut[0:5])
+    print("p_cell", p[0:5])
+    return nut, p, U
+
+
+def read_openfoam_mesh(case_path):
+    """
+    读取 OpenFOAM 网格的点和单元信息
+    """
+    polyMesh_path = os.path.join(case_path, "constant/polyMesh")
+
+    # 读取点坐标
+    points = []
+    with open(os.path.join(polyMesh_path, "points"), "r") as f:
+        lines = f.readlines()
+        start = lines.index("(\n") + 1
+        end = lines.index(")\n", start)
+        for line in lines[start:end]:
+            coords = line.strip().strip("()").split()
+            points.append([float(c) for c in coords])  # 三维坐标 (x, y, z)
+    points = np.array(points, dtype=np.float32)
+
+    # 读取面连接性
+    faces = []
+    with open(os.path.join(polyMesh_path, "faces"), "r") as f:
+        lines = f.readlines()
+        start = lines.index("(\n") + 1
+        end = lines.index(")\n", start)
+        face_str = "".join(lines[start:end]).replace("\n", "")
+        for face in face_str.split(")")[:-1]:
+            n_pts = int(face.split("(")[0])
+            pts = list(map(int, face.split("(")[1].split()))
+            faces.append(pts)  # 存储面的点索引
+
+    # 读取单元-面关系 (owner)
+    owner = []
+    with open(os.path.join(polyMesh_path, "owner"), "r") as f:
+        lines = f.readlines()
+        start = lines.index("(\n") + 1
+        end = lines.index(")\n", start)
+        owner = [int(line.strip()) for line in lines[start:end]]
+
+    neighbour = []
+    with open(os.path.join(polyMesh_path, "neighbour"), "r") as f:
+        lines = f.readlines()
+        start = lines.index("(\n") + 1
+        end = lines.index(")\n", start)
+        neighbour = [int(line.strip()) for line in lines[start:end]]
+
+    return points, faces, owner, neighbour
+
+def extract_aerofoil_surface(start_face, n_faces , owner, boundary_name="BLADE"):
+    """
+    提取翼型表面（边界）的几何信息
+    """
+
+    aerofoil_faces = range(start_face, start_face + n_faces)
+
+    # 提取翼型表面的点和单元信息
+    aerofoil_points = set()
+    aerofoil_cells = []
+    for face_idx in aerofoil_faces:
+        face = faces[face_idx]
+        aerofoil_points.update(face)
+        aerofoil_cells.append([len(face)] + face)
+
+    # 构建点索引映射
+    point_map = {pt: i for i, pt in enumerate(aerofoil_points)}
+    aerofoil_points = np.array([points[pt] for pt in aerofoil_points])
+
+    # 更新单元连接性
+    aerofoil_cells = [[cell[0]] + [point_map[pt] for pt in cell[1:]] for cell in aerofoil_cells]
+
+    return aerofoil_points, aerofoil_cells
+
+def calculate_length(points, cells):
+    """
+    计算每个单元的长度（适用于翼型的四边形单元）
+    :param points: 所有点的坐标，形状为 (n_points, 3)
+    :param cells: 所有单元的序列号，形状为 (n_cells, 5)
+                 每个单元的第一个元素是单元类型（4 表示四边形单元），后面是四个点的序列号
+    :return: 每个单元的长度，形状为 (n_cells,)
+    """
+    lengths = []
+    for cell in cells:
+        if cell[0] == 4:  # 四边形单元（四个点）
+            # 获取四个点的坐标
+            pt1 = points[cell[1]][:2]  # 舍弃 z 方向
+            pt2 = points[cell[2]][:2]  # 舍弃 z 方向
+            pt3 = points[cell[3]][:2]  # 舍弃 z 方向
+            pt4 = points[cell[4]][:2]  # 舍弃 z 方向
+
+            # 计算四条边的长度
+            length1 = np.linalg.norm(pt2 - pt1)
+            length2 = np.linalg.norm(pt3 - pt2)
+            length3 = np.linalg.norm(pt4 - pt3)
+            length4 = np.linalg.norm(pt1 - pt4)
+
+            # 计算单元的长度（四条边的平均长度）
+            length = (length1 + length2 + length3 + length4) / 4
+            lengths.append(length)
+        else:
+            lengths.append(0.0)  # 如果不是四边形单元，长度为 0
+    return np.array(lengths)
+
+def extract_surface_points(points, cells):
+    """
+    提取翼型表面上的点
+    :param points: 点坐标数组，shape 为 (n, 3)
+    :param cells: 面单元列表，每个面单元是一个列表，第一个元素是单元类型，后面是点的索引
+    :return: 表面点的索引列表
+    """
+    surface_points = set()
+    for cell in cells:
+        if cell[0] == 4:  # 四边形面单元
+            surface_points.update(cell[1:5])
+        elif cell[0] == 3:  # 三角形面单元
+            surface_points.update(cell[1:4])
+    return list(surface_points)
+def extract_boundary_edges(cells):
+    """
+    从面单元中提取边界边
+    :param cells: 面单元列表，每个面单元是一个列表，第一个元素是单元类型，后面是点的索引
+    :return: 边界边列表，每个边界边是一个元组 (pt1_index, pt2_index)
+    """
+    edge_count = defaultdict(int)  # 记录每条边被共享的次数
+
+    for cell in cells:
+        if cell[0] == 4:  # 四边形面单元
+            # 获取四条边
+            edges = [
+                (cell[1], cell[2]),  # 边1
+                (cell[2], cell[3]),  # 边2
+                (cell[3], cell[4]),  # 边3
+                (cell[4], cell[1])   # 边4
+            ]
+        elif cell[0] == 3:  # 三角形面单元
+            # 获取三条边
+            edges = [
+                (cell[1], cell[2]),  # 边1
+                (cell[2], cell[3]),  # 边2
+                (cell[3], cell[1])   # 边3
+            ]
+        else:
+            continue  # 忽略其他类型的单元
+
+        # 记录每条边
+        for edge in edges:
+            # 将边标准化为有序元组（避免 (a, b) 和 (b, a) 被认为是不同的边）
+            sorted_edge = tuple(sorted(edge))
+            edge_count[sorted_edge] += 1
+
+    # 提取只被共享一次的边（边界边）
+    boundary_edges = [edge for edge, count in edge_count.items() if count == 1]
+    return boundary_edges
+def connect_boundary_edges(boundary_edges):
+    """
+    将边界边连接成连续的线段
+    :param boundary_edges: 边界边列表，每个边界边是一个元组 (pt1_index, pt2_index)
+    :return: 连续的线段列表，每个线段是一个点的索引列表
+    """
+    from collections import defaultdict
+
+    # 构建邻接表
+    adj_list = defaultdict(list)
+    for edge in boundary_edges:
+        adj_list[edge[0]].append(edge[1])
+        adj_list[edge[1]].append(edge[0])
+
+    # 找到线段的起点（度为1的点）
+    start_points = [point for point, neighbors in adj_list.items() if len(neighbors) == 1]
+
+    # 如果没有度为1的点，说明边界是一个闭环，任意选择一个起点
+    if not start_points:
+        start_points = [boundary_edges[0][0]]
+
+    # 连接边界边
+    segments = []
+    visited = set()  # 记录已经访问过的点
+
+    for start in start_points:
+        if start in visited:
+            continue  # 如果起点已经访问过，跳过
+
+        segment = []
+        current = start
+        prev = None
+
+        while True:
+            segment.append(current)
+            visited.add(current)
+            neighbors = adj_list[current]
+
+            # 找到下一个点
+            next_point = None
+            for neighbor in neighbors:
+                if neighbor != prev:
+                    next_point = neighbor
+                    break
+
+            if next_point is None or next_point in visited:
+                break  # 如果没有下一个点或下一个点已经访问过，结束当前线段
+
+            prev = current
+            current = next_point
+
+        segments.append(segment)
+
+    return segments
+def calculate_segment_lengths(points, segments):
+    """
+    计算每一段的长度
+    :param points: 点坐标数组，shape 为 (n, 3)
+    :param segments: 连续的线段列表，每个线段是一个点的索引列表
+    :return: 每一段的长度列表
+    """
+    segment_lengths = []
+    for segment in segments:
+        length = 0.0
+        for i in range(len(segment) - 1):
+            pt1 = points[segment[i]]
+            pt2 = points[segment[i + 1]]
+            length += np.linalg.norm(pt2 - pt1)
+        segment_lengths.append(length)
+    return segment_lengths
+def read_points(file):
+    """
+    修复版本：支持 OpenFOAM 多格式 points 文件
+    """
+    try:
+        with open(file, "r") as f:
+            content = f.read()
+
+        # 匹配所有浮点数字符（支持科学计数法）
+        points = re.findall(
+            r"\(?\s*([-+]?\d+\.?\d*([eE][-+]?\d+)?)\s+"
+            r"([-+]?\d+\.?\d*([eE][-+]?\d+)?)\s+"
+            r"([-+]?\d+\.?\d*([eE][-+]?\d+)?)\s*\)?",
+            content
+        )
+
+        # 提取有效坐标
+        clean_points = []
+        for match in points:
+            x, y, z = match[0], match[2], match[4]
+            clean_points.append([float(x), float(y), float(z)])
+
+        if not clean_points:
+            raise ValueError("未找到有效坐标点")
+
+        return np.array(clean_points)
+
+    except FileNotFoundError:
+        raise FileNotFoundError(f"文件不存在: {file}")
+    except Exception as e:
+        raise RuntimeError(f"解析错误: {str(e)}")
+def read_faces(file):
+    """
+    改进版本：支持 OpenFOAM 多格式面文件解析
+    """
+    try:
+        with open(file, "r") as f:
+            content = f.read()
+
+        # 使用正则匹配所有面定义（兼容多种格式）
+        face_pattern = re.compile(
+            r"\b(\d+)\s*\(\s*((?:\d+\s+)*\d+)\s*\)",  # 匹配 "n(v0 v1 ... vn)"
+            re.MULTILINE
+        )
+
+        # 提取所有匹配的面数据
+        matches = face_pattern.findall(content)
+        if not matches:
+            raise ValueError("未找到有效的面数据")
+
+        # 解析面数据
+        faces = []
+        for match in matches:
+            n_vertices = int(match[0])  # 顶点数量（实际可能不需要）
+            indices = list(map(int, match[1].split()))
+
+            # 验证顶点数量一致性（可选）
+            if len(indices) != n_vertices:
+                raise ValueError(f"顶点数量声明不一致: 声明{n_vertices} 实际{len(indices)}")
+
+            faces.append(indices)
+
+        return faces
+
+    except FileNotFoundError:
+        raise FileNotFoundError(f"文件不存在: {file}")
+    except Exception as e:
+        raise RuntimeError(f"解析错误: {str(e)}")
+def read_boundary(file, patch_name="BLADE"):
+    """
+    增强版：支持 OpenFOAM 多格式 boundary 文件解析
+    """
+    try:
+        with open(file, "r") as f:
+            content = f.read()
+
+        # 正则匹配目标 patch 块
+        pattern = re.compile(
+            rf"{re.escape(patch_name)}\s*"  # 匹配 patch 名称（允许名称含特殊字符）
+            r"\{\s*"
+            r"(.*?)\s*"                     # 捕获块内内容（非贪婪）
+            r"(?=\n\w+\s*{{|\Z)",            # 前瞻终止条件
+            re.DOTALL | re.IGNORECASE
+        )
+
+        # 查找目标 patch
+        match = pattern.search(content)
+        if not match:
+            available = re.findall(r"(\w+)\s*{", content)
+            raise ValueError(f"找不到 Patch '{patch_name}', 可用 Patches: {available}")
+
+        # 提取关键字段
+        block = match.group(1)
+        start_face = re.search(r"startFace\s+(\d+)\s*;", block)
+        n_faces = re.search(r"nFaces\s+(\d+)\s*;", block)
+
+        if not start_face or not n_faces:
+            missing = []
+            if not start_face: missing.append("startFace")
+            if not n_faces: missing.append("nFaces")
+            raise ValueError(f"Patch '{patch_name}' 缺失字段: {missing}")
+
+        return {
+            "startFace": int(start_face.group(1)),
+            "nFaces": int(n_faces.group(1))
+        }
+
+    except FileNotFoundError:
+        raise FileNotFoundError(f"文件不存在: {file}")
+    except Exception as e:
+        raise RuntimeError(f"解析错误: {str(e)}")
+
+def nearest_neighbor_sort(points_2d):
+    """
+    使用最近邻排序重新排列点
+    :param points_2d: 二维翼型的坐标数组，shape 为 (n, 2)
+    :return: 重新排列后的点坐标数组，shape 为 (n, 2)
+    """
+    n = len(points_2d)
+    reordered_points = np.zeros_like(points_2d)
+    visited = np.zeros(n, dtype=bool)  # 记录点是否被访问过
+
+    # 选择起点（X 坐标最小的点）
+    start_index = np.argmin(points_2d[:, 0])
+    reordered_points[0] = points_2d[start_index]
+    visited[start_index] = True
+
+    # 按最近邻顺序连接点
+    for i in range(1, n):
+        last_point = reordered_points[i - 1]
+        distances = np.linalg.norm(points_2d - last_point, axis=1)  # 计算与最后一个点的距离
+        distances[visited] = np.inf  # 忽略已访问的点
+        nearest_index = np.argmin(distances)  # 找到最近的未访问点
+        reordered_points[i] = points_2d[nearest_index]
+        visited[nearest_index] = True
+
+    return reordered_points
+def plot_2d_airfoil(points_2d):
+    """
+    绘制二维翼型点及其连线（按最近邻顺序）
+    :param points_2d: 二维翼型的坐标数组，shape 为 (n, 2)
+    """
+    # 重新排列点
+    points_2d_reordered = nearest_neighbor_sort(points_2d)
+
+    plt.figure(figsize=(10, 6))
+    x = points_2d_reordered[:, 0]
+    y = points_2d_reordered[:, 1]
+
+    # 绘制点
+    plt.scatter(x, y, c='b', label='Airfoil Points')
+
+    # 绘制连线
+    plt.plot(x, y, c='g', linestyle='-', linewidth=1, label='Airfoil Contour')
+
+    # 添加标签
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.title('2D Airfoil Points with Connections')
+    plt.legend()
+    plt.grid(True)
+    plt.axis('equal')  # 保持 X 和 Y 轴比例一致
+    plt.show()
+def generate_naca0012(num_points=100):
+    """
+    生成完整的 NACA0012 翼型
+    :param num_points: 点的数量
+    :return: 翼型的点坐标，形状为 (2 * num_points, 2)
+    """
+    # 生成上表面的点
+    x_up = np.linspace(0, 1, num_points)
+    y_up = 0.6 * (0.2969 * np.sqrt(x_up) - 0.1260 * x_up - 0.3516 * x_up ** 2 + 0.2843 * x_up ** 3 - 0.1015 * x_up ** 4)
+
+    # 生成下表面的点（y 坐标取反）
+    x_down = np.linspace(1, 0, num_points)  # 从 1 到 0 以确保顺序正确
+    y_down = -0.6 * (0.2969 * np.sqrt(
+        x_down) - 0.1260 * x_down - 0.3516 * x_down ** 2 + 0.2843 * x_down ** 3 - 0.1015 * x_down ** 4)
+
+    # 组合上下表面的点
+    x = np.concatenate((x_up, x_down))
+    y = np.concatenate((y_up, y_down))
+
+    return np.column_stack((x, y))
+def calculate_normals(points):
+    """
+    计算封闭翼型的法线方向
+    :param points: 翼型的点坐标，形状为 (n, 2)
+    :return: 中点坐标 (mid_points) 和法线方向 (normals)
+    """
+    # 提取 x 和 y 坐标
+    x = points[:, 0]
+    y = points[:, 1]
+
+    # 计算切线向量（差分）
+    dx = np.diff(x, append=x[0])  # 封闭翼型，起点和终点相连
+    dy = np.diff(y, append=y[0])  # 封闭翼型，起点和终点相连
+
+    # 计算法线方向（旋转 90 度）
+    nx = -dy
+    ny = dx
+
+    # 单位化法线方向
+    norm = np.sqrt(nx ** 2 + ny ** 2 + 1e-10)  # 添加小常数避免除以零
+    nx /= norm
+    ny /= norm
+
+    # 计算中点
+    mid_x = (x + np.roll(x, -1)) / 2  # 封闭翼型，起点和终点相连
+    mid_y = (y + np.roll(y, -1)) / 2  # 封闭翼型，起点和终点相连
+    mid_points = np.column_stack((mid_x, mid_y))  # 组合为中点数组
+
+    # 组合法线方向
+    normals = np.column_stack((nx, ny))
+
+    return mid_points, normals
+def plot_airfoil_with_normals(points, num_normals=50):
+    """
+    绘制翼型和法线
+    :param points: 翼型的点坐标，形状为 (n, 2)
+    :param num_normals: 要绘制的法向量数量（默认为 10）
+    """
+    # 计算法线
+    mid_points, normals = calculate_normals(points)
+    print('mid xxxxxxx  =', len(mid_points))
+    print('normals  xxxxxxxx =', len(normals))
+
+    # 创建图形
+    plt.figure(figsize=(10, 6))
+
+    # 绘制翼型
+    plt.plot(points[:, 0], points[:, 1], label="Airfoil", color="blue", linewidth=2)
+
+    # 均匀选择法向量
+    step = max(1, len(mid_points) // num_normals)  # 均匀选择法向量
+
+
+
+    selected_mid_points = mid_points[::step]
+    selected_normals = normals[::step]
+
+
+
+    # 缩短法向量长度为图片度量的 5%
+    scale_factor = 0.002  # 直接在函数内部设置
+    selected_normals *= scale_factor  # 修改法向量长度
+
+    # 绘制法线（缩短后的长度，带箭头）
+    plt.quiver(selected_mid_points[:, 0], selected_mid_points[:, 1],
+               selected_normals[:, 0], selected_normals[:, 1],
+               angles='xy', scale_units='xy', scale=1, color="red",
+               width=0.002, headwidth=3, headlength=5, label="Normal Vectors")
+
+    # 设置图形属性
+    plt.title(f"Airfoil with {num_normals} Normal Vectors (Length: {scale_factor * 100}% of Image Scale)")
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.axis("equal")  # 保持 x 和 y 比例一致
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+def process_face_data(start_face, num_faces, owner_data, neighbour_data, p_data, U_data, nut_data):
+    """
+    处理每个面对应的场变量数据并返回相应的场变量值
+    :param start_face: 起始 face 索引
+    :param num_faces: 要处理的 face 数量
+    :param owner_data: owner 单元数据
+    :param neighbour_data: 邻居单元数据
+    :param p_data: p 场数据
+    :param U_data: U 场数据
+    :param nut_data: nut 场数据
+    :return: 包含 p_values, U_values, nut_values 和邻居数据的元组
+    """
+
+    # 存储每个 face 对应的场变量数据
+    p_values = []
+    U_values = []
+    nut_values = []
+
+    # 存储邻居数据的列表（可选）
+    neighbour_p_values = []
+    neighbour_U_values = []
+    neighbour_nut_values = []
+
+    # 检查最大索引是否超过数据的有效范围
+    max_face_idx = start_face + num_faces
+    if max_face_idx > len(owner_data):
+        raise IndexError(f"访问的 face 索引超出数据范围，max_face_idx = {max_face_idx}, 数据长度 = {len(owner_data)}")
+
+    # 遍历每个 face 索引
+    for face_idx in range(start_face, start_face + num_faces):
+        try:
+            # 检查索引是否有效
+            if face_idx >= len(owner_data):
+                print(f"警告: face {face_idx} 超出 owner_data 范围")
+                continue
+
+            # 获取该 face 对应的 owner 单元索引
+            cell_idx = owner_data[face_idx]
+
+            # 从各自的场变量数据中提取数据
+            if cell_idx < len(p_data):
+                p_values.append(p_data[cell_idx])
+            else:
+                print(f"警告: p_data 中没有找到单元 {cell_idx} 的数据")
+
+            if cell_idx < len(U_data):
+                U_values.append(U_data[cell_idx])
+            else:
+                print(f"警告: U_data 中没有找到单元 {cell_idx} 的数据")
+
+            if cell_idx < len(nut_data):
+                nut_values.append(nut_data[cell_idx])
+            else:
+                print(f"警告: nut_data 中没有找到单元 {cell_idx} 的数据")
+
+            # 如果是内部面，也可以考虑 neighbour 单元
+            if face_idx < len(neighbour_data):  # 确保是内部面
+                neighbour_cell_idx = neighbour_data[face_idx]
+                # 检查相邻单元索引的有效性
+                if neighbour_cell_idx < len(p_data):
+                    neighbour_p_values.append(p_data[neighbour_cell_idx])
+                else:
+                    print(f"警告: neighbour p_data 中没有找到相邻单元 {neighbour_cell_idx} 的数据")
+
+                if neighbour_cell_idx < len(U_data):
+                    neighbour_U_values.append(U_data[neighbour_cell_idx])
+                else:
+                    print(f"警告: neighbour U_data 中没有找到相邻单元 {neighbour_cell_idx} 的数据")
+
+                if neighbour_cell_idx < len(nut_data):
+                    neighbour_nut_values.append(nut_data[neighbour_cell_idx])
+                else:
+                    print(f"警告: neighbour nut_data 中没有找到相邻单元 {neighbour_cell_idx} 的数据")
+
+        except IndexError as e:
+            print(f"Error accessing data for cell {cell_idx} at face {face_idx}: {e}")
+
+    # 将结果转换为 NumPy 数组（如果需要的话）
+    p_values = np.array(p_values)
+    U_values = np.array(U_values)
+    nut_values = np.array(nut_values)
+
+    # 如果你想把邻居数据也转换为 NumPy 数组
+    neighbour_p_values = np.array(neighbour_p_values)
+    neighbour_U_values = np.array(neighbour_U_values)
+    neighbour_nut_values = np.array(neighbour_nut_values)
+
+    # 返回处理后的结果
+    return p_values, U_values, nut_values
+def calculate_intersection_lengths(cells, points_2d):
+    """
+    计算每个面元与翼型的交线长度
+    :param cells: 面元列表，每个面元是一个列表，第一个元素是单元类型，后面是点的索引
+    :param points_2d: 二维翼型的坐标数组，shape 为 (n, 2)
+    :return: 每个面元的交线长度列表
+    """
+    intersection_lengths = []
+    for cell in cells:
+        if cell[0] == 4:  # 四边形面元
+            # 提取 4 个点的索引
+            pt_indices = cell[1:5]
+            # 提取 4 个点的二维坐标
+            pts = points_2d[pt_indices]
+            # 计算交线长度（四边形的周长）
+            length = 0.0
+            for i in range(4):
+                pt1 = pts[i]
+                pt2 = pts[(i + 1) % 4]  # 闭环处理
+                length += np.linalg.norm(pt2 - pt1)  # 计算边的长度
+            intersection_lengths.append(length)
+        else:
+            intersection_lengths.append(0.0)  # 如果不是四边形面元，长度为 0
+    return intersection_lengths
+
+def calculate_face_length(aerofoil_cells, aerofoil_points):
+    """
+    计算二维翼型在三维网格中的每个面（cell）的边长之和
+    :param aerofoil_cells: 面单元的点索引集合
+    :param aerofoil_points: 点坐标数组，每个点是一个三维坐标 (x, y, z)
+    :return: 每个面（cell）的总长度
+    """
+    face_lengths = []
+
+    # 遍历每个面
+    for cell in aerofoil_cells:
+        # 假设每个 cell 是一个多边形，cell 是一个包含点索引的列表
+        cell_points = np.array([aerofoil_points[pt_idx] for pt_idx in cell])  # 提取每个面上的点坐标
+
+        # 初始化当前面（cell）的总长度
+        total_length = 0.0
+
+        # 计算每条边的长度（每两个相邻的点之间的距离）
+        num_points = len(cell_points)
+        for i in range(num_points):
+            # 计算当前边与下一个边（循环回到起点）
+            point1 = cell_points[i]
+            point2 = cell_points[(i + 1) % num_points]
+            edge_length = np.linalg.norm(point2 - point1)  # 计算欧几里得距离
+            total_length += edge_length
+
+        # 将该面的总长度添加到列表中
+        face_lengths.append(total_length)
+
+    return face_lengths
+
+
+
+
+def calculate_triangle_normal(v0, v1, v2):
+    e1 = v1 - v0
+    e2 = v2 - v0
+    n = np.cross(e1, e2)
+    norm = np.linalg.norm(n)  # 新增：计算法向量长度
+    if norm < 1e-10:  # 新增：检查法向量长度是否接近于零
+        return np.array([0.0, 0.0, 0.0])  # 新增：返回零向量
+    n_normalized = n / norm
+    return n_normalized
+
+def calculate_quad_normal(v0, v1, v2, v3):
+    n1 = calculate_triangle_normal(v0, v1, v2)
+    n2 = calculate_triangle_normal(v0, v2, v3)
+    n_avg = (n1 + n2) / 2
+    norm = np.linalg.norm(n_avg)  # 新增：计算法向量长度
+    if norm < 1e-10:  # 新增：检查法向量长度是否接近于零
+        return np.array([0.0, 0.0, 0.0])  # 新增：返回零向量
+    n_avg_normalized = n_avg / norm
+    return n_avg_normalized
+
+def calculate_face_normals(cell_airfoil, point_airfoil):
+    """
+    计算翼型表面每个单元的法向量
+    :param cell_airfoil: 翼型表面的单元列表，每个单元由四个点的索引组成，形状为 (N, 4) 的列表或数组
+    :param point_airfoil: 翼型表面的点坐标，形状为 (M, 3) 的 numpy 数组
+    :return: 每个单元的法向量，形状为 (N, 3) 的 numpy 数组
+    """
+    face_normals = []
+    for cell in cell_airfoil:
+        # 获取四个顶点的坐标
+        v0 = point_airfoil[cell[0]]
+        v1 = point_airfoil[cell[1]]
+        v2 = point_airfoil[cell[2]]
+        v3 = point_airfoil[cell[3]]
+        # 计算法向量
+        normal = calculate_quad_normal(v0, v1, v2, v3)
+        face_normals.append(normal)
+    return np.array(face_normals)
+
+
+def cell_data_to_point_data(cell_data, cell_connectivity, num_points):
+    """
+    将 Cell Data 转换为 Point Data
+    :param cell_data: 每个单元的标量或向量值，形状为 (N,) 或 (N, D)
+    :param cell_connectivity: 每个单元的顶点索引，形状为 (N, K)
+    :param num_points: 点的总数
+    :return: 每个点的标量或向量值，形状为 (M,) 或 (M, D)
+    """
+    # 初始化 Point Data
+    if cell_data.ndim == 1:  # 标量数据
+        point_data = np.zeros(num_points)
+    else:  # 向量数据
+        point_data = np.zeros((num_points, cell_data.shape[1]))
+
+    # 初始化计数器，记录每个点被多少单元共享
+    point_counter = np.zeros(num_points)
+
+    # 遍历所有单元
+    for i, cell in enumerate(cell_connectivity):
+        for point_index in cell:
+            point_data[point_index] += cell_data[i]  # 累加 Cell Data
+            point_counter[point_index] += 1  # 更新计数器
+
+    # 计算平均值
+    point_data /= point_counter[:, np.newaxis] if cell_data.ndim > 1 else point_counter
+
+    return point_data
+
+def create_vtp_file(case_path, time_dir, output_path, boundary_name="aerofoil"):
+    """
+    创建包含翼型信息的 VTP 文件
+    """
+    # 读取 OpenFOAM 网格
+    points, faces, owner = read_openfoam_mesh(case_path)
+
+    # 提取翼型表面
+    aerofoil_points, aerofoil_cells = extract_aerofoil_surface(points, faces, owner, boundary_name)
+
+    # 创建 PyVista 非结构化网格
+    aerofoil = pv.UnstructuredGrid(aerofoil_cells, [CellType.POLYGON] * len(aerofoil_cells), aerofoil_points)
+
+    # 读取场数据（假设已实现）
+    nut, p, U, normals = read_aerofoil_field_data(case_path, time_dir, boundary_name)
+
+    # ----------------------------
+    # 添加点数据 (Point Data)
+    # ----------------------------
+    aerofoil.point_data["nut"] = nut
+    aerofoil.point_data["p"] = p
+    aerofoil.point_data["U"] = U
+    aerofoil.point_data["Normals"] = normals
+
+    # ----------------------------
+    # 添加单元数据 (Cell Data)
+    # ----------------------------
+    #lengths = calculate_length(aerofoil_points, aerofoil_cells)
+    #aerofoil.cell_data["nut"] = nut[:len(aerofoil_cells)]
+    #aerofoil.cell_data["p"] = p[:len(aerofoil_cells)]
+    #aerofoil.cell_data["U"] = U[:len(aerofoil_cells)]
+    #aerofoil.cell_data["Normals"] = normals[:len(aerofoil_cells)]
+    #aerofoil.cell_data["Length"] = lengths
+
+    # ----------------------------
+    # 添加场数据 (Field Data)
+    # ----------------------------
+    time_value = float(time_dir)  # 时间步目录名即为时间值
+    aerofoil.field_data["TimeValue"] = [time_value]
+
+    # 保存为 VTP 文件
+    aerofoil.save(output_path)
+    print(f"VTP 文件已保存至: {output_path}")
+
+
+
+case_path = "/Users/southfox/Computation/openfoam/1.18e5"
+time_dir = "20000"
+
+output_path = "aerofoil_surface.vtp" # 输出的 VTP 文件路径
+boundary_name = "BLADE"           # 翼型边界的名称（需与 boundary 文件一致）
+
+points, faces, owner, neighbour = read_openfoam_mesh(case_path)
+
+blade_points = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/points'
+blade_faces = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/faces'
+blade_boundary = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/boundary'
+
+points = read_points(blade_points)
+faces = read_faces(blade_faces)
+boundary = read_boundary(blade_boundary, patch_name="BLADE")
+startFace = boundary["startFace"]
+nFaces = boundary["nFaces"]
+
+
+
+aerofoil_points, aerofoil_cells = extract_aerofoil_surface(startFace, nFaces, owner, boundary_name="BLADE")
+aerofoil = pv.PolyData(aerofoil_points, aerofoil_cells)
+
+# ----------------------------
+# 添加单元数据 (Cell Data)
+# ----------------------------
+
+points, faces, owner, neighbour = read_openfoam_mesh(case_path)
+
+nut, p, U = read_field_data(case_path, time_dir)
+lengths = calculate_face_length(aerofoil_cells, aerofoil_points)
+normals = calculate_face_normals(aerofoil_cells, aerofoil_points)
+
+
+p, U, nut = process_face_data(startFace, nFaces, owner, neighbour, p, U, nut)
+aerofoil.cell_data["nut"] = nut
+aerofoil.cell_data["p"] = p
+aerofoil.cell_data["U"] = U
+aerofoil.cell_data["lengths"] = lengths
+aerofoil.cell_data["Normals"] = normals
+
+
+nut_point = cell_data_to_point_data(nut, aerofoil_cells, len(aerofoil_points))
+p_point = cell_data_to_point_data(p, aerofoil_cells, len(aerofoil_points))
+U_point = cell_data_to_point_data(U, aerofoil_cells, len(aerofoil_points))
+normals = cell_data_to_point_data(normals, aerofoil_cells, len(aerofoil_points))
+
+
+aerofoil.point_data["nut"] = nut_point
+aerofoil.point_data["p"] = p_point
+aerofoil.point_data["U"] = U_point
+aerofoil.point_data["normals"] = normals
+
+time_value = float(time_dir)  # 时间步目录名即为时间值
+aerofoil.field_data["TimeValue"] = [time_value]
+
+
+aerofoil.save(output_path)
+
+
+
+
+aerofoil = pv.read(output_path)
+
+print('======================================================')
+
+print("aerofoil:", aerofoil.point_data.keys())
+print("aerofoil:", aerofoil.cell_data.keys())
+print("aerofoil:", aerofoil.field_data.keys())
