@@ -1,0 +1,491 @@
+
+import os
+import numpy as np
+import pyvista as pv
+from pyvista import CellType
+import re
+import matplotlib.pyplot as plt
+import scipy.spatial
+from pathlib import Path
+from pyvista import UnstructuredGrid
+import pandas as pd
+
+
+
+def read_openfoam_mesh(case_path):
+    """读取 OpenFOAM 网格的点和单元信息"""
+    polyMesh_path = os.path.join(case_path, "constant/polyMesh")
+
+    # 读取点坐标
+    points = []
+    with open(os.path.join(polyMesh_path, "points"), "r") as f:
+        lines = f.readlines()
+        start = lines.index("(\n") + 1
+        end = lines.index(")\n", start)
+        for line in lines[start:end]:
+            coords = line.strip().strip("()").split()
+            # 将二维坐标扩展为三维 (x, y, 0)
+            points.append([float(coords[0]), float(coords[1]), 0.0])
+    points = np.array(points, dtype=np.float32)
+
+    # 读取面连接性
+    faces = []
+    with open(os.path.join(polyMesh_path, "faces"), "r") as f:
+        lines = f.readlines()
+        start = lines.index("(\n") + 1
+        end = lines.index(")\n", start)
+        face_str = "".join(lines[start:end]).replace("\n", "")
+        for face in face_str.split(")")[:-1]:
+            n_pts = int(face.split("(")[0])
+            pts = list(map(int, face.split("(")[1].split()))
+            faces.append(pts)  # 存储面的点索引
+
+    # 读取单元-面关系 (owner)
+    owner = []
+    with open(os.path.join(polyMesh_path, "owner"), "r") as f:
+        lines = f.readlines()
+        start = lines.index("(\n") + 1
+        end = lines.index(")\n", start)
+        owner = [int(line.strip()) for line in lines[start:end]]
+
+    # 构建单元连接性
+    cells = []
+    cell_types = []
+    i = 0
+    for cell_id in range(max(owner) + 1):  # 单元索引从 0 开始
+        i += 1
+        print('cell = ', i)
+        # 找到属于当前单元的所有面
+        cell_faces = [face for face_idx, face in enumerate(faces) if owner[face_idx] == cell_id]
+
+        # 合并面的点索引（去重）
+        cell_points = list(set([pt for face in cell_faces for pt in face]))
+
+        # 存储单元连接性（VTK 格式: [顶点数, 点索引1, 点索引2, ...]）
+        cells.append([len(cell_points)] + cell_points)
+        cell_types.append(CellType.POLYGON)
+    print('hello in cell_types')
+    return points, cells, cell_types
+def read_vector_field(time_dir, field_name):
+    """
+    读取 OpenFOAM 矢量场（volVectorField）的 internalField 数据
+    返回形状为 (N_cells, 3) 的二维数组
+    """
+    #field_path = os.path.join(case_path, time_dir, field_name)
+
+    field_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/U"
+
+    with open(field_path, "r") as f:
+        lines = f.readlines()
+
+        # 定位数据起始位置
+        start = None
+        for i, line in enumerate(lines):
+            if "internalField" in line and "nonuniform" in line:
+                start = i + 2  # 跳过行如 '29808('
+                break
+
+        if start is None:
+            raise ValueError("未找到 internalField 数据")
+
+        # 提取所有矢量数据
+        vectors = []
+        for line in lines[start:]:
+            line = line.strip()
+            if line == ")":  # 数据结束
+                break
+            # 解析格式如 "(-29.5711 -29.4823 4.5193e-25)"
+            components = line.strip("()").split()
+            vectors.append([float(c) for c in components])
+    return np.array(vectors)
+def read_scalar_field(time_dir, field_name):
+    """
+    读取 OpenFOAM 标量场（volScalarField）的 internalField 数据
+    返回形状为 (N_cells,) 的一维数组
+    """
+    case_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/p"
+    field_path = case_path  # 假设直接读取 p 文件
+
+    with open(field_path, "r") as f:
+        lines = f.readlines()
+
+        # 定位数据起始位置
+        start = None
+        for i, line in enumerate(lines):
+            if "internalField" in line and "nonuniform" in line:
+                # 数据格式示例：
+                # internalField nonuniform List<scalar>
+                # 29808
+                # (
+                # 值1
+                # 值2
+                # ...
+                # )
+                start = i + 3  # 跳过 internalField 行、数据总数行和 '(' 行
+                break
+
+        if start is None:
+            raise ValueError("未找到 internalField 数据")
+
+        # 提取标量数据
+        values = []
+        for line in lines[start:]:
+            line = line.strip()
+            if line == ")":  # 数据结束
+                break
+            if line.startswith("//") or line == "(" or line == ")":
+                continue  # 跳过注释和括号
+            try:
+                values.append(float(line))
+            except ValueError:
+                print(f"警告：无法转换行数据为浮点数: {line}")
+                continue
+
+        # 验证数据完整性
+        declared_count = int(lines[i+1].strip())  # 文件声明的数据总数
+        if len(values) != declared_count:
+            raise ValueError(
+                f"数据不完整: 文件声明 {declared_count} 个值，实际解析 {len(values)} 个值"
+            )
+
+    return np.array(values)
+def read_field_data(case_path, time_dir):
+
+    U_cell = read_vector_field(time_dir, "U")
+    U = np.array([row for row in U_cell if len(row) > 0])
+
+    """读取场数据（标量和矢量）"""
+    # 标量场 (nut, p)
+    nut = read_scalar_field(time_dir, "nut")
+    p = read_scalar_field(time_dir, "p")
+    print("U_cell",U[0:5])
+    print("nut_cell", nut[0:5])
+    print("p_cell", p[0:5])
+    return nut, p, U
+def create_vtu_file(case_path, time_dir, output_path):
+    """创建包含指定数据的 VTU 文件"""
+    # 读取网格
+    points, cells, cell_types = read_openfoam_mesh(case_path)
+
+    # 创建 PyVista 非结构化网格（使用三维点坐标）
+    grid = pv.UnstructuredGrid(cells, cell_types, points)  # 使用三维点坐标
+
+    # 读取场数据（单元中心数据）
+    nut_cell, p_cell, U_cell = read_field_data(case_path, time_dir)
+
+    # ----------------------------
+    # 添加单元数据 (Cell Data)
+    # ----------------------------
+    grid.cell_data["nut"] = nut_cell
+    grid.cell_data["p"] = p_cell
+    grid.cell_data["U"] = U_cell
+    grid.cell_data["cell_ids"] = np.arange(grid.n_cells)
+    grid.cell_data["vtkOriginalCellIds"] = np.arange(grid.n_cells)
+
+    # ----------------------------
+    # 添加点数据 (Point Data)
+    # ----------------------------
+    # 假设 implicit_distance 已预计算（示例中生成随机值）
+    # 将单元数据插值到点数据
+    grid_with_point_data = grid.cell_data_to_point_data()
+
+    # 将插值后的点数据添加到原始网格
+    grid.point_data["nut"] = grid_with_point_data["nut"]
+    grid.point_data["p"] = grid_with_point_data["p"]
+    grid.point_data["U"] = grid_with_point_data["U"]
+
+
+    grid.point_data["implicit_distance"] = sdf
+
+    grid.point_data["vtkOriginalPointIds"] = np.arange(grid.n_points)
+
+    # ----------------------------
+    # 添加场数据 (Field Data)
+    # ----------------------------
+    time_value = float(time_dir)  # 时间步目录名即为时间值
+    grid.field_data["TimeValue"] = [time_value]
+
+    # 保存为 VTU 文件
+    grid.save(output_path)
+
+def read_points(file):
+    """
+    修复版本：支持 OpenFOAM 多格式 points 文件
+    """
+    try:
+        with open(file, "r") as f:
+            content = f.read()
+
+        # 匹配所有浮点数字符（支持科学计数法）
+        points = re.findall(
+            r"\(?\s*([-+]?\d+\.?\d*([eE][-+]?\d+)?)\s+"
+            r"([-+]?\d+\.?\d*([eE][-+]?\d+)?)\s+"
+            r"([-+]?\d+\.?\d*([eE][-+]?\d+)?)\s*\)?",
+            content
+        )
+
+        # 提取有效坐标
+        clean_points = []
+        for match in points:
+            x, y, z = match[0], match[2], match[4]
+            clean_points.append([float(x), float(y), float(z)])
+
+        if not clean_points:
+            raise ValueError("未找到有效坐标点")
+
+        return np.array(clean_points)
+
+    except FileNotFoundError:
+        raise FileNotFoundError(f"文件不存在: {file}")
+    except Exception as e:
+        raise RuntimeError(f"解析错误: {str(e)}")
+def read_faces(file):
+    """
+    改进版本：支持 OpenFOAM 多格式面文件解析
+    """
+    try:
+        with open(file, "r") as f:
+            content = f.read()
+
+        # 使用正则匹配所有面定义（兼容多种格式）
+        face_pattern = re.compile(
+            r"\b(\d+)\s*\(\s*((?:\d+\s+)*\d+)\s*\)",  # 匹配 "n(v0 v1 ... vn)"
+            re.MULTILINE
+        )
+
+        # 提取所有匹配的面数据
+        matches = face_pattern.findall(content)
+        if not matches:
+            raise ValueError("未找到有效的面数据")
+
+        # 解析面数据
+        faces = []
+        for match in matches:
+            n_vertices = int(match[0])  # 顶点数量（实际可能不需要）
+            indices = list(map(int, match[1].split()))
+
+            # 验证顶点数量一致性（可选）
+            if len(indices) != n_vertices:
+                raise ValueError(f"顶点数量声明不一致: 声明{n_vertices} 实际{len(indices)}")
+
+            faces.append(indices)
+
+        return faces
+
+    except FileNotFoundError:
+        raise FileNotFoundError(f"文件不存在: {file}")
+    except Exception as e:
+        raise RuntimeError(f"解析错误: {str(e)}")
+def read_boundary(file, patch_name="BLADE"):
+    """
+    增强版：支持 OpenFOAM 多格式 boundary 文件解析
+    """
+    try:
+        with open(file, "r") as f:
+            content = f.read()
+
+        # 正则匹配目标 patch 块
+        pattern = re.compile(
+            rf"{re.escape(patch_name)}\s*"  # 匹配 patch 名称（允许名称含特殊字符）
+            r"\{\s*"
+            r"(.*?)\s*"                     # 捕获块内内容（非贪婪）
+            r"(?=\n\w+\s*{{|\Z)",            # 前瞻终止条件
+            re.DOTALL | re.IGNORECASE
+        )
+
+        # 查找目标 patch
+        match = pattern.search(content)
+        if not match:
+            available = re.findall(r"(\w+)\s*{", content)
+            raise ValueError(f"找不到 Patch '{patch_name}', 可用 Patches: {available}")
+
+        # 提取关键字段
+        block = match.group(1)
+        start_face = re.search(r"startFace\s+(\d+)\s*;", block)
+        n_faces = re.search(r"nFaces\s+(\d+)\s*;", block)
+
+        if not start_face or not n_faces:
+            missing = []
+            if not start_face: missing.append("startFace")
+            if not n_faces: missing.append("nFaces")
+            raise ValueError(f"Patch '{patch_name}' 缺失字段: {missing}")
+
+        return {
+            "startFace": int(start_face.group(1)),
+            "nFaces": int(n_faces.group(1))
+        }
+
+    except FileNotFoundError:
+        raise FileNotFoundError(f"文件不存在: {file}")
+    except Exception as e:
+        raise RuntimeError(f"解析错误: {str(e)}")
+
+def extract_wall_patch(points, xfaces, wall_startFace, wall_nFaces):
+    """提取壁面相关点及原始索引（带完整参数校验）"""
+
+    # ----------------------------
+    # 参数有效性校验
+    # ----------------------------
+    # 校验输入数据类型
+    if not isinstance(xfaces, (list, np.ndarray)):
+        raise TypeError(f"xfaces 应为 list 或 numpy.ndarray 类型，当前类型为 {type(xfaces)}")
+
+    # 校验非负索引和正数面数
+    if wall_startFace < 0:
+        raise ValueError(f"起始面索引不能为负数，当前值为 {wall_startFace}")
+    if wall_nFaces <= 0:
+        raise ValueError(f"面数量必须为正整数，当前值为 {wall_nFaces}")
+
+    # 校验面数据范围
+    total_faces = len(xfaces)
+    if total_faces == 0:
+        raise ValueError("输入面数据为空")
+    if (wall_startFace + wall_nFaces) > total_faces:
+        raise ValueError(
+            f"面切片范围越界: 起始面={wall_startFace}, 请求面数={wall_nFaces}, "
+            f"总面数={total_faces}"
+        )
+
+    # ----------------------------
+    # 面数据提取
+    # ----------------------------
+    wall_faces = xfaces[wall_startFace: wall_startFace + wall_nFaces]
+
+    # ----------------------------
+    # 顶点索引有效性验证
+    # ----------------------------
+    wall_indices = set()
+    max_point_idx = len(points) - 1  # 最大有效索引
+
+    for face in wall_faces:
+        # 校验面的结构
+        if len(face) < 3:
+            raise ValueError(f"检测到非多边形面，顶点数不足3个: {face}")
+
+        # 校验顶点索引范围
+        for idx in face:
+            if not (0 <= idx <= max_point_idx):
+                raise IndexError(
+                    f"发现无效顶点索引 {idx}，点数组长度仅为 {len(points)} "
+                    f"(有效索引范围: 0-{max_point_idx})"
+                )
+        wall_indices.update(face)
+
+    # ----------------------------
+    # 数据提取与格式化
+    # ----------------------------
+    sorted_indices = sorted(wall_indices)
+
+    try:
+        # 高效处理 numpy 数组
+        if isinstance(points, np.ndarray):
+            wall_points = points[sorted_indices]
+        # 兼容列表或其他可迭代类型
+        else:
+            wall_points = np.array([points[i] for i in sorted_indices])
+    except IndexError as e:
+        raise RuntimeError("点坐标提取失败，请确保 points 与索引一致性") from e
+
+    return wall_points, np.array(sorted_indices)
+def compute_face_normals(points, faces):
+    """ 计算所有面的法向量（支持任意多边形面，修正方向指向外部） """
+    normals = np.zeros((len(points), 3))
+    count = np.zeros(len(points))
+
+    for face in faces:
+        if len(face) < 3:
+            continue
+
+        # 将面分解为三角形扇形
+        p0 = np.array(points[face[0]])
+        for i in range(2, len(face)):
+            p1 = np.array(points[face[i - 1]])
+            p2 = np.array(points[face[i]])
+
+            # 计算法向量（修正方向：叉乘顺序改为 vec2 × vec1）
+            vec1 = p1 - p0
+            vec2 = p2 - p0
+            normal = np.cross(vec2, vec1)  # 关键修改：交换叉乘顺序
+
+            norm = np.linalg.norm(normal)
+            if norm < 1e-10:
+                continue
+
+            normal /= norm
+
+            # 累加到顶点
+            for idx in [face[0], face[i - 1], face[i]]:
+                if idx >= len(points):
+                    raise IndexError(f"无效顶点索引 {idx}，总点数 {len(points)}")
+                normals[idx] += normal
+                count[idx] += 1
+
+    # 归一化
+    valid = count > 0
+    normals[valid] /= np.linalg.norm(normals[valid], axis=1, keepdims=True)
+    return normals
+def compute_signed_sdf(wall_points, wall_normals, query_points):
+    """ 向量化 SDF 计算（符号方向已修正） """
+    tree = scipy.spatial.KDTree(wall_points)
+    distances, nearest_idx = tree.query(query_points)
+
+    vectors = query_points - wall_points[nearest_idx]
+    dot_prods = np.einsum('ij,ij->i', vectors, wall_normals[nearest_idx])
+
+    # 确保符号约定：外部为正，内部为负
+    return distances * np.sign(dot_prods)
+
+
+
+
+blade_points = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/points'
+blade_faces = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/faces'
+blade_boundary = '/Users/southfox/Computation/openfoam/1.18e5/constant/polyMesh/boundary'
+
+points = read_points(blade_points)
+faces = read_faces(blade_faces)
+boundary = read_boundary(blade_boundary, patch_name="BLADE")
+startFace = boundary["startFace"]
+nFaces = boundary["nFaces"]
+wall_points, wall_indices = extract_wall_patch(
+    points = points,
+    xfaces = faces,
+    wall_startFace = startFace,
+    wall_nFaces = nFaces
+)
+
+wall_normals = compute_face_normals(points, faces)[wall_indices]
+polyMesh_path = Path("/Users/southfox/Computation/openfoam/1.18e5//constant/polyMesh")
+
+
+query_points = points[:,0:2]
+
+sdf = compute_signed_sdf(
+    wall_points[:, :2],  # 使用二维投影
+    wall_normals[:, :2],
+    query_points
+)
+
+case_path = "/Users/southfox/Computation/openfoam/1.18e5"
+time_dir = "20000"
+output_path = "output_case.vtu"
+
+create_vtu_file(case_path, time_dir, output_path)
+print(f"VTU 文件已保存至: {output_path}")
+
+
+openfoam_vtu = pv.read(output_path)
+
+output_path = "output_case.vtu"
+
+openfoam_vtu = pv.read(output_path)
+
+print('======================================================')
+
+print("openfoam_vtu Point Data Keys:", openfoam_vtu.point_data.keys())
+print("openfoam_vtu Cell Data Keys:", openfoam_vtu.cell_data.keys())
+print("openfoam_vtu Field Data Keys:", openfoam_vtu.field_data.keys())
+
+print(" ======  begin vtp ===========")
+
+
