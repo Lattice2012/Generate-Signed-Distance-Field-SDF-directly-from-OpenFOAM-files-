@@ -453,14 +453,14 @@ def create_vtp_file(case_path, time_dir, output_path, boundary_name="BLADE"):
     setep nine: 生成 vtp 文件
     '''
     aerofoil.save(output_path)
-def read_vector_field(time_dir, field_name):
+def read_vector_field(case_path,time_dir, field_name):
     """
     读取 OpenFOAM 矢量场（volVectorField）的 internalField 数据
     返回形状为 (N_cells, 3) 的二维数组
     """
-    #field_path = os.path.join(case_path, time_dir, field_name)
+    field_path = os.path.join(case_path, time_dir, field_name)
 
-    field_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/U"
+    #ield_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/U"
 
     with open(field_path, "r") as f:
         lines = f.readlines()
@@ -484,7 +484,46 @@ def read_vector_field(time_dir, field_name):
             # 解析格式如 "(-29.5711 -29.4823 4.5193e-25)"
             components = line.strip("()").split()
             vectors.append([float(c) for c in components])
+    vectors = np.array([row for row in vectors if len(row) > 0])
     return np.array(vectors)
+
+def read_vector_field_test(cas_path,time_dir, field_name):
+    """
+    读取 OpenFOAM 矢量场（volVectorField）的 internalField 数据
+    返回形状为 (N_cells, 3) 的二维数组
+    """
+    field_path = os.path.join(case_path, time_dir, field_name)
+    print('field_path = ', field_path)
+
+
+
+    with open(field_path, "r") as f:
+        lines = f.readlines()
+
+        # 定位数据起始位置
+        start = None
+        for i, line in enumerate(lines):
+            if "internalField" in line and "nonuniform" in line:
+                start = i + 2  # 跳过行如 '29808('
+                break
+
+        if start is None:
+            raise ValueError("未找到 internalField 数据")
+
+        # 提取所有矢量数据
+        vectors = []
+        for line in lines[start:]:
+            line = line.strip()
+            if line == ")":  # 数据结束
+                break
+            # 解析格式如 "(-29.5711 -29.4823 4.5193e-25)"
+            components = line.strip("()").split()
+            vectors.append([float(c) for c in components])
+
+        vectors = np.array([row for row in vectors if len(row) > 0])
+
+    return np.array(vectors)
+
 def read_scalar_field(time_dir, field_name):
     """
     读取 OpenFOAM 标量场（volScalarField）的 internalField 数据
@@ -538,7 +577,7 @@ def read_scalar_field(time_dir, field_name):
     return np.array(values)
 def read_field_data(case_path, time_dir):
 
-    U_cell = read_vector_field(time_dir, "U")
+    U_cell = read_vector_field(case_path,time_dir, "U")
     U = np.array([row for row in U_cell if len(row) > 0])
 
     """读取场数据（标量和矢量）"""
@@ -830,7 +869,6 @@ def create_vtu_file(case_path, time_dir, output_path):
 
     # 保存为 VTU 文件
     grid.save(output_path)
-
 def save_sdf_to_csv(sdf, output_file):
     """
     将 SDF 数据保存为 CSV 文件。
@@ -839,8 +877,6 @@ def save_sdf_to_csv(sdf, output_file):
     output_file = 'sdf_data.csv'
     np.savetxt(output_file, sdf, delimiter=',', fmt='%.6f')
     print(f"SDF 数据已保存到 {sdf_data.csv}")
-
-
 def load_sdf_from_csv(filename):
     """
     从 CSV 文件加载 SDF 数据。
@@ -860,10 +896,8 @@ blade_boundary = os.path.join(polyMesh_path, "boundary")
 time_dir = "20000"
 output_path_vtu = "aerofoil.vtu"
 output_path_vtp = "aerofoil_surface.vtp"
-
-
-
 filename = 'sdf_data.csv'
+
 
 if os.path.exists(filename):
     #如果文件存在，直接加载
@@ -877,28 +911,21 @@ else:
 
 create_vtu_file(case_path, time_dir, output_path_vtu)
 print(f"VTU 文件已保存至: {output_path_vtu}")
-
 openfoam_vtu = pv.read(output_path_vtu)
-
 print('======================================================')
 
 print("openfoam_vtu Point Data Keys:", openfoam_vtu.point_data.keys())
 print("openfoam_vtu Cell Data Keys:", openfoam_vtu.cell_data.keys())
 print("openfoam_vtu Field Data Keys:", openfoam_vtu.field_data.keys())
-
 print(" ======  begin vtp ===========")
-
-
 create_vtp_file(case_path, time_dir, output_path_vtp, boundary_name)
-
-
 print('=========== 检查生成的 vtp 文件的 data_keys ========================')
 aerofoil = pv.read("aerofoil_surface.vtp")
-
-
 print("aerofoil:", aerofoil.point_data.keys())
 print("aerofoil:", aerofoil.cell_data.keys())
 print("aerofoil:", aerofoil.field_data.keys())
+
+
 
 
 '''
@@ -995,8 +1022,6 @@ def read_field_data(case_path, time_dir):
     p = read_scalar_field(time_dir, "p")
     return nut, p, U
 '''
-
-
 '''
 sc = plt.scatter(x, y, c=sdf_values, cmap="coolwarm", s=5)
 plt.colorbar(sc, label="Signed Distance")  # 添加颜色条
