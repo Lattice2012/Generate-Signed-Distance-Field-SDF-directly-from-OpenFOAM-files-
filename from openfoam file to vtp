@@ -39,6 +39,7 @@ def read_vector_field(time_dir, field_name):
             # 解析格式如 "(-29.5711 -29.4823 4.5193e-25)"
             components = line.strip("()").split()
             vectors.append([float(c) for c in components])
+    vectors = np.array([row for row in vectors if len(row) > 0])
     return np.array(vectors)
 def read_scalar_field(time_dir, field_name):
     """
