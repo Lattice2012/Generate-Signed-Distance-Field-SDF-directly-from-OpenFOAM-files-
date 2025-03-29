@@ -8,6 +8,12 @@ from collections import defaultdict
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
 from scipy.spatial import KDTree
+from scipy.optimize import newton
+from skimage.measure import marching_cubes
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from skimage.measure import label, find_contours
+from sklearn.cluster import DBSCAN
+
 
 
 def read_openfoam_mesh_2(case_path,boundary_name):
@@ -105,14 +111,14 @@ def read_openfoam_mesh_2(case_path,boundary_name):
             "startFace": int(start_face.group(1)),
             "nFaces": int(n_faces.group(1))
         }
-def read_vector_field(time_dir, field_name):
+def read_vector_field(case_path,time_dir, field_name):
     """
     读取 OpenFOAM 矢量场（volVectorField）的 internalField 数据
     返回形状为 (N_cells, 3) 的二维数组
     """
-    #field_path = os.path.join(case_path, time_dir, field_name)
+    field_path = os.path.join(case_path, time_dir, field_name)
 
-    field_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/U"
+    #field_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/U"
 
     with open(field_path, "r") as f:
         lines = f.readlines()
@@ -138,13 +144,16 @@ def read_vector_field(time_dir, field_name):
             vectors.append([float(c) for c in components])
     vectors = np.array([row for row in vectors if len(row) > 0])
     return np.array(vectors)
-def read_scalar_field(time_dir, field_name):
+def read_scalar_field(case_path, time_dir, field_name):
     """
     读取 OpenFOAM 标量场（volScalarField）的 internalField 数据
     返回形状为 (N_cells,) 的一维数组
     """
-    case_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/p"
-    field_path = case_path  # 假设直接读取 p 文件
+    #case_path = "/Users/southfox/Computation/openfoam/1.18e5/20000/p"
+
+    field_path = os.path.join(case_path, time_dir, field_name)
+
+    #field_path = case_path  # 假设直接读取 p 文件
 
     with open(field_path, "r") as f:
         lines = f.readlines()
@@ -190,14 +199,15 @@ def read_scalar_field(time_dir, field_name):
 
     return np.array(values)
 def read_field_data(case_path, time_dir):
-    U_cell = read_vector_field(time_dir, "U")
+    U_cell = read_vector_field(case_path, time_dir, "U")
     U = np.array([row for row in U_cell if len(row) > 0])
 
     """读取场数据（标量和矢量）"""
     # 标量场 (nut, p)
-    nut = read_scalar_field(time_dir, "nut")
-    p = read_scalar_field(time_dir, "p")
-    return nut, p, U
+    nut = read_scalar_field(case_path,time_dir, "nut")
+    p = read_scalar_field(case_path,time_dir, "p")
+    T = read_scalar_field(case_path, time_dir, "T")
+    return nut, p, U,T
 def extract_aerofoil_surface(points,faces,start_face, n_faces , owner, boundary_name="BLADE"):
     """
     提取翼型表面（边界）的几何信息
@@ -241,7 +251,7 @@ def generate_naca0012(num_points=100):
     y = np.concatenate((y_up, y_down))
 
     return np.column_stack((x, y))
-def process_face_data(start_face, num_faces, owner_data, neighbour_data, p_data, U_data, nut_data):
+def process_face_data(start_face, num_faces, owner_data, neighbour_data, p_data, U_data, nut_data,T_data):
     """
     处理每个面对应的场变量数据并返回相应的场变量值
     :param start_face: 起始 face 索引
@@ -258,11 +268,13 @@ def process_face_data(start_face, num_faces, owner_data, neighbour_data, p_data,
     p_values = []
     U_values = []
     nut_values = []
+    T_values = []
 
     # 存储邻居数据的列表（可选）
     neighbour_p_values = []
     neighbour_U_values = []
     neighbour_nut_values = []
+    neighbour_T_values = []
 
     # 检查最大索引是否超过数据的有效范围
     max_face_idx = start_face + num_faces
@@ -296,6 +308,11 @@ def process_face_data(start_face, num_faces, owner_data, neighbour_data, p_data,
             else:
                 print(f"警告: nut_data 中没有找到单元 {cell_idx} 的数据")
 
+            if cell_idx < len(T_data):
+                T_values.append(T_data[cell_idx])
+            else:
+                print(f"警告: nut_data 中没有找到单元 {cell_idx} 的数据")
+
             # 如果是内部面，也可以考虑 neighbour 单元
             if face_idx < len(neighbour_data):  # 确保是内部面
                 neighbour_cell_idx = neighbour_data[face_idx]
@@ -315,6 +332,12 @@ def process_face_data(start_face, num_faces, owner_data, neighbour_data, p_data,
                 else:
                     print(f"警告: neighbour nut_data 中没有找到相邻单元 {neighbour_cell_idx} 的数据")
 
+
+                if neighbour_cell_idx < len(T_data):
+                    T_nut_values.append(T_data[neighbour_cell_idx])
+                else:
+                    print(f"警告: neighbour nut_data 中没有找到相邻单元 {neighbour_cell_idx} 的数据")
+
         except IndexError as e:
             print(f"Error accessing data for cell {cell_idx} at face {face_idx}: {e}")
 
@@ -322,14 +345,17 @@ def process_face_data(start_face, num_faces, owner_data, neighbour_data, p_data,
     p_values = np.array(p_values)
     U_values = np.array(U_values)
     nut_values = np.array(nut_values)
+    T_values = np.array(T_values)
 
     # 如果你想把邻居数据也转换为 NumPy 数组
     neighbour_p_values = np.array(neighbour_p_values)
     neighbour_U_values = np.array(neighbour_U_values)
     neighbour_nut_values = np.array(neighbour_nut_values)
+    neighbour_T_values = np.array(neighbour_T_values)
 
     # 返回处理后的结果
-    return p_values, U_values, nut_values
+    return p_values, U_values, nut_values, T_values
+
 def calculate_face_length(aerofoil_cells, aerofoil_points):
     """
     计算二维翼型在三维网格中的每个面（cell）的边长之和
@@ -442,7 +468,7 @@ def create_vtp_file(case_path, time_dir, output_path, boundary_name="BLADE"):
     setep two  读取网格中的数据,计算 lengths 和  normals
     '''
 
-    nut, p, U = read_field_data(case_path, time_dir)
+    nut, p, U, T = read_field_data(case_path, time_dir)
     lengths = calculate_face_length(aerofoil_cells, aerofoil_points)
     normals = calculate_face_normals(aerofoil_cells, aerofoil_points)
 
@@ -455,7 +481,7 @@ def create_vtp_file(case_path, time_dir, output_path, boundary_name="BLADE"):
     '''
     setep four: 处理每个面对应的场变量数据并返回相应的场变量值
     '''
-    p, U, nut = process_face_data(startFace, nFaces, owner, neighbour, p, U, nut)
+    p, U, nut,T = process_face_data(startFace, nFaces, owner, neighbour, p, U, nut,T)
 
     '''
     setep five: 将 cell 数据加入网格
@@ -818,6 +844,107 @@ def nearest_neighbor_sort(points_2d):
     return reordered_points
 
 
+# ==========================
+# 核心计算函数
+# ==========================
+def calculate_mach_field(U, T, gamma=1.4, R=287.0):
+    """
+    计算马赫数场
+    参数:
+        U: 速度场 [m/s], 形状 (...,3)
+        T: 温度场 [K], 形状 (...)
+    返回:
+        M: 马赫数场, 形状 (...)
+    """
+    a = np.sqrt(gamma * R * T)          # 声速场
+    U_mag = np.linalg.norm(U, axis=-1)  # 速度大小
+    return U_mag / a
+
+
+def detect_shocks_unstructured(points, M, p,
+                               M_threshold=1.0,
+                               p_jump_threshold=0.2,
+                               eps=0.03,
+                               min_samples=10):
+    """
+    非结构网格翼型表面激波检测
+    参数:
+        points: 节点坐标 (N,2)
+        M: 马赫数 (N,)
+        p: 压力 (N,)
+        M_threshold: 马赫数阈值
+        p_jump_threshold: 压力突跃阈值 (Δp/p_ref)
+        eps: 激波点聚类半径
+        min_samples: 最小激波点数
+    返回:
+        shock_clusters: 激波点簇列表 [array1, array2,...]
+    """
+    # 计算参考压力（取前缘压力）
+    p_ref = np.percentile(p, 90)  # 避免取到异常值
+
+    # 建立空间索引
+    tree = KDTree(points)
+
+    # 计算每个点的局部压力梯度
+    dp_mag = np.zeros(len(points))
+    for i, (pt, pressure) in enumerate(zip(points, p)):
+        # 找最近的5个点（不包括自己）
+        _, idx = tree.query(pt, k=6)
+        neighbors = idx[1:]  # 排除自身
+
+        # 计算局部压力梯度
+        dP = p[neighbors] - pressure
+        dX = points[neighbors] - pt
+        grad = np.linalg.lstsq(dX, dP, rcond=None)[0]
+        dp_mag[i] = np.linalg.norm(grad)
+
+    # 激波判据
+    is_shock = (M > M_threshold) & (dp_mag > p_jump_threshold * p_ref)
+    shock_points = points[is_shock]
+
+    # 如果没有激波点则返回空列表
+    if len(shock_points) == 0:
+        return []
+
+    # 对激波点进行聚类
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(shock_points)
+    labels = clustering.labels_
+
+    # 提取各激波簇
+    shock_clusters = []
+    for label in np.unique(labels):
+        if label != -1:  # 排除噪声点
+            cluster = shock_points[labels == label]
+
+            # 按x坐标排序（使激波线连续）
+            cluster = cluster[cluster[:, 0].argsort()]
+            shock_clusters.append(cluster)
+
+    return shock_clusters
+
+def plot_unstructured_shocks(points, M, shock_clusters):
+    """非结构网格可视化"""
+    plt.figure(figsize=(12, 5))
+
+    # 马赫数分布
+    plt.subplot(121)
+    sc = plt.scatter(points[:, 0], points[:, 1], c=M,
+                     cmap='viridis', s=5, vmin=0, vmax=2)
+    plt.colorbar(sc, label='Mach Number')
+    plt.xlabel('x/c')
+    plt.ylabel('y/c')
+    plt.title('Surface Mach Number Distribution')
+
+    # 激波位置
+    plt.subplot(122)
+    sc = plt.scatter(points[:, 0], points[:, 1], c=M,
+                     cmap='viridis', s=5, vmin=0, vmax=2)
+    for cluster in shock_clusters:
+        plt.plot(cluster[:, 0], cluster[:, 1], 'r-', lw=2, alpha=0.7)
+    plt.title('Detected Shock Locations')
+    plt.tight_layout()
+    plt.show()
+
 
 boundary_name = "BLADE"
 case_path = "/Users/southfox/Computation/openfoam/1.18e5"
@@ -832,15 +959,17 @@ filename = 'sdf_data.csv'
 
 
 points, faces, owner, neighbour, boundary = read_openfoam_mesh_2(case_path, boundary_name)
+
 startFace = boundary["startFace"]
 nFaces = boundary["nFaces"]
 aerofoil_points, aerofoil_cells = extract_aerofoil_surface(points, faces, startFace, nFaces, owner,
                                                            boundary_name="BLADE")
 
-nut, p, U = read_field_data(case_path, time_dir)
+nut, p, U, T = read_field_data(case_path, time_dir)
+
+p, U, nut, T = process_face_data(startFace, nFaces, owner, neighbour, p, U, nut,T)
 
 
-p, U, nut = process_face_data(startFace, nFaces, owner, neighbour, p, U, nut)
 
 #p = cell_data_to_point_data(p, aerofoil_cells, len(aerofoil_points))
 
@@ -861,39 +990,94 @@ centers_2d_reordered = nearest_neighbor_sort(centers_2d)
 
 p_sorted = p[original_indices]
 U_sorted = U[original_indices]
+T_sorted = T[original_indices]
 
-# 假设已知数据
-p = p_sorted     # 翼型表面压力数组 (形状: N)
-p_inf = 101325   # 自由来流压力 (Pa, 标准大气压)
-rho_inf = 1.225  # 自由来流密度 (kg/m³, 海平面)
-U_inf = 50       # 自由来流速度 (m/s)
+points = centers_2d_reordered
+
+
+
+
+
+Ma = calculate_mach_field(U_sorted, T_sorted, gamma=1.4, R=287.0)
+
+
+
+
+# ==========================
+# 气体常数和边界条件设置
+# ==========================
+gamma = 1.4                  # 比热比
+R = 287.0                    # 空气气体常数 [J/(kg·K)]
+p0_inf = 1.0e5              # 自由来流总压 [Pa]
+T0_inf = 288.15              # 自由来流总温 [K]
+U_inf = np.array([90, 159.35, 0]) # 自由来流速度 [m/s]
+U_mag = np.linalg.norm(U_inf) # 速度大小 [m/s]
+rho_inf = p0_inf/(R * T0_inf)
+
 
 # 计算动态压力 q_inf
-q_inf = 0.5 * rho_inf * U_inf**2
+q_inf = 0.5 * rho_inf * U_mag**2
 
 # 计算 C_p
-C_p = (p - p_inf)/q_inf/1000
+C_p = (p_sorted  - p0_inf) / q_inf
 
-
-
-
+print('cp = ',C_p.max())
 
 
 plt.figure(figsize=(10, 6))
 x = centers_2d_reordered [:, 0]
+
+# 计算弦长范围
+x_min, x_max = np.min(x), np.max(x)
+c = x_max - x_min  # 弦长
+
+# 归一化到[0, 1]
+x = (x - x_min) / c
+
+
 y = centers_2d_reordered [:, 1]
-# 绘制点
-#plt.scatter(x, C_p, c='b', label='Airfoil Points')
 
-# 绘制连线
-plt.plot(x, C_p, c='g', linestyle='-', linewidth=1, label='Airfoil Contour')
 
-# 添加标签
-plt.xlabel('X')
-plt.ylabel('Y')
-plt.title('2D Airfoil Points with Connections')
+n = 5
+plt.scatter(x[::n], Ma[::n], c='b', marker='s', label='Airfoil Points')
+
+# plot Ma fig
+plt.plot(x, Ma, c='g', linestyle='-', linewidth=1, label='Airfoil Contour')
+# 自动计算合理范围（保留5%边界空白）
+x_padding = 0.05 * (max(x) - min(x))
+y_padding = 0.05 * (max(Ma) - min(Ma))
+plt.xlim(min(x) - x_padding, max(x) + x_padding)
+plt.ylim(min(Ma) - y_padding, max(Ma) + y_padding)
+
+plt.xlabel('X (x/c)')  # 建议标注标准化弦长
+plt.ylabel('$Ma$')    # 使用LaTeX格式
+plt.title('Ma Distribution')
 plt.legend()
-plt.grid(True)
-plt.axis('equal')  # 保持 X 和 Y 轴比例一致
-plt.show()
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()  # 防止标签被截断
+#plt.show()
+save_path = "Ma.png"  # 直接保存在当前目录
+plt.savefig(save_path)  # 保存图像
+plt.close()  # 关闭图形
+#End plot Ma fig
 
+
+# plot Cp fig
+plt.plot(x, Ma, c='g', linestyle='-', linewidth=1, label='Airfoil Contour')
+# 自动计算合理范围（保留5%边界空白）
+x_padding = 0.05 * (max(x) - min(x))
+y_padding = 0.05 * (max(Ma) - min(Ma))
+plt.xlim(min(x) - x_padding, max(x) + x_padding)
+plt.ylim(min(C_p) - y_padding, max(C_p) + y_padding)
+
+plt.xlabel('X (x/c)')  # 建议标注标准化弦长
+plt.ylabel('$C_p$')    # 使用LaTeX格式
+plt.title('C_p Distribution')
+plt.legend()
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()  # 防止标签被截断
+#plt.show()
+save_path = "C_p.png"  # 直接保存在当前目录
+plt.savefig(save_path)  # 保存图像
+plt.close()  # 关闭图形
+#End plot Ma fig
