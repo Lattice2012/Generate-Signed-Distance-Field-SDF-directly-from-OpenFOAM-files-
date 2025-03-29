@@ -3,4 +3,4 @@ Generate Signed Distance Field (SDF) directly from OpenFOAM files for neural net
 
 from openfoam to vtp is ok,but should be improved.
 
-Cp 文件是计算翼型 Cp的。但是还没有完成. 
+Cp 是不可压翼型的升力系数图,Ma 是不可压翼型的马赫数分布图.
