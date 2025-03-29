@@ -1,3 +1,4 @@
+
 # 不可压缩翼型叶栅的 Cp 和 Ma 分布
 import os
 import numpy as np
@@ -1063,10 +1064,12 @@ plt.close()  # 关闭图形
 
 
 # plot Cp fig
-plt.plot(x, Ma, c='g', linestyle='-', linewidth=1, label='Airfoil Contour')
+plt.plot(x, C_p, c='g', linestyle='-', linewidth=1, label='Airfoil Contour')
+n = 5
+plt.scatter(x[::n], C_p[::n], c='b', marker='s', label='Airfoil Points')
 # 自动计算合理范围（保留5%边界空白）
 x_padding = 0.05 * (max(x) - min(x))
-y_padding = 0.05 * (max(Ma) - min(Ma))
+y_padding = 0.05 * (max(C_p) - min(C_p))
 plt.xlim(min(x) - x_padding, max(x) + x_padding)
 plt.ylim(min(C_p) - y_padding, max(C_p) + y_padding)
 
